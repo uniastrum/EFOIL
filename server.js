@@ -53,7 +53,11 @@ bot.use((ctx, next) => {
 bot.command('relay_on', async (ctx) => {
   try {
     const duration = parseInt(ctx.message.text.split(' ')[1]);
-    if (isNaN(duration) throw new Error('Invalid duration');
+    
+    // ИСПРАВЛЕННАЯ ПРОВЕРКА
+    if (isNaN(duration)) {
+      throw new Error('Invalid duration');
+    }
     
     await new Promise((resolve, reject) => {
       db.run(
