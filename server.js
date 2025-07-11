@@ -50,11 +50,11 @@ bot.use((ctx, next) => {
   return next();
 });
 
+// Обработчики команд
 bot.command('relay_on', async (ctx) => {
   try {
     const duration = parseInt(ctx.message.text.split(' ')[1]);
     
-    // ИСПРАВЛЕННАЯ ПРОВЕРКА
     if (isNaN(duration)) {
       throw new Error('Invalid duration');
     }
@@ -96,7 +96,7 @@ bot.command('relay_off', async (ctx) => {
 
 // API для ESP32
 app.get('/get_command', (req, res) => {
-  console.log('GET /get_command request from:', req.ip);
+  console.log('GET /get_command from:', req.ip);
   
   db.get(
     `SELECT * FROM commands 
@@ -110,15 +110,13 @@ app.get('/get_command', (req, res) => {
       }
       
       if (row) {
-        console.log('Sending command:', row.command);
         db.run('UPDATE commands SET processed = 1 WHERE id = ?', row.id);
-        return res.status(200).json({  // Явно указываем статус 200
+        return res.status(200).json({
           command: row.command,
           duration: row.duration || 0
         });
       }
       
-      // Если команд нет - возвращаем 200 с null
       res.status(200).json({ command: null });
     }
   );
@@ -141,41 +139,58 @@ app.get('/', (req, res) => {
 });
 
 // Обработка ошибок
-app.use((req, res) => {
-  console.warn('404 Not Found:', req.method, req.url);
-  res.status(404).json({ 
-    error: 'Not Found',
-    message: 'Route does not exist'
-  });
+app.use((err, req, res, next) => {
+  console.error('Server error:', err);
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 // Запуск сервера
 const PORT = process.env.PORT || 10000;
 
-const start = async () => {
+const startServer = async () => {
   try {
-    await bot.launch();
-    app.listen(PORT, () => {
+    // Удаляем вебхук и останавливаем предыдущие сессии
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+    console.log('Webhook deleted');
+
+    // Запускаем бота в polling режиме с явными параметрами
+    bot.launch({
+      polling: {
+        timeout: 30,
+        limit: 100,
+        allowedUpdates: [],
+        dropPendingUpdates: true
+      }
+    }).then(() => {
+      console.log(`Bot @${bot.options.username} started in polling mode`);
+    });
+
+    // Запускаем Express сервер
+    app.listen(PORT, '0.0.0.0', () => {
       console.log(`Server running on port ${PORT}`);
-      console.log(`Bot @${bot.options.username} started`);
     });
   } catch (err) {
     console.error('Startup failed:', err);
-    process.exit(1);
+    // Перезапуск через 5 секунд при ошибке
+    setTimeout(startServer, 5000);
   }
 };
 
 // Graceful shutdown
-process.once('SIGINT', () => {
-  bot.stop('SIGINT');
-  db.close();
-  process.exit();
-});
+const shutdown = async () => {
+  console.log('Shutting down gracefully...');
+  try {
+    await bot.stop();
+    db.close();
+    process.exit(0);
+  } catch (err) {
+    console.error('Shutdown error:', err);
+    process.exit(1);
+  }
+};
 
-process.once('SIGTERM', () => {
-  bot.stop('SIGTERM');
-  db.close();
-  process.exit();
-});
+process.once('SIGINT', shutdown);
+process.once('SIGTERM', shutdown);
 
-start();
+// Запуск приложения
+startServer();
