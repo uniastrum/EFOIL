@@ -96,7 +96,7 @@ bot.command('relay_off', async (ctx) => {
 
 // API для ESP32
 app.get('/get_command', (req, res) => {
-  console.log('Request from:', req.ip);
+  console.log('GET /get_command request from:', req.ip);
   
   db.get(
     `SELECT * FROM commands 
@@ -110,14 +110,16 @@ app.get('/get_command', (req, res) => {
       }
       
       if (row) {
+        console.log('Sending command:', row.command);
         db.run('UPDATE commands SET processed = 1 WHERE id = ?', row.id);
-        res.json({
+        return res.status(200).json({  // Явно указываем статус 200
           command: row.command,
           duration: row.duration || 0
         });
-      } else {
-        res.status(404).json({ command: null });
       }
+      
+      // Если команд нет - возвращаем 200 с null
+      res.status(200).json({ command: null });
     }
   );
 });
@@ -139,9 +141,12 @@ app.get('/', (req, res) => {
 });
 
 // Обработка ошибок
-app.use((err, req, res, next) => {
-  console.error('Server error:', err);
-  res.status(500).json({ error: 'Internal server error' });
+app.use((req, res) => {
+  console.warn('404 Not Found:', req.method, req.url);
+  res.status(404).json({ 
+    error: 'Not Found',
+    message: 'Route does not exist'
+  });
 });
 
 // Запуск сервера
