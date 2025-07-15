@@ -1,0 +1,10 @@
+# flyctl launch added from .gitignore
+**\.env
+**\.config
+**\.data
+**\node_modules
+**\.DS_Store
+**\.glitchdotcom.json
+**\.node-gyp
+**\node_modules
+fly.toml

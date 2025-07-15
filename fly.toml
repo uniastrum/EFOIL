@@ -1,34 +1,30 @@
-app = 'app-misty-tree-3230'
+# fly.toml app configuration file generated for app-empty-rain-635 on 2025-07-15T13:25:46+07:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'app-empty-rain-635'
 primary_region = 'sin'
-
-[build]
-
-[env]
-  PORT = '8080'
-
-[deploy]
-  strategy = "immediate"
-
-[processes]
-  app = "npm run start"
 
 [experimental]
   auto_rollback = true
 
+[build]
+
+[deploy]
+  strategy = 'immediate'
+
+[env]
+  PORT = '8080'
+
+[processes]
+  app = 'npm run start'
+
 [http_service]
   internal_port = 8080
-  force_https = false
-  auto_stop_machines = false
-  min_machines_running = 1  # ✅ только одна машина
-  processes = ["app"]
-
-  [[http_service.ports]]
-    handlers = ['http']
-    port = 80
-
-  [[http_service.ports]]
-    handlers = ['tls', 'http']
-    port = 443
+  auto_stop_machines = 'off'
+  min_machines_running = 1
+  processes = ['app']
 
 [[vm]]
   memory = '1gb'
