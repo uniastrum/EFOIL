@@ -1,0 +1,36 @@
+app = 'app-misty-tree-3230'
+primary_region = 'sin'
+
+[build]
+
+[env]
+  PORT = '8080'
+
+[deploy]
+  strategy = "immediate"
+
+[processes]
+  app = "npm run start"
+
+[experimental]
+  auto_rollback = true
+
+[http_service]
+  internal_port = 8080
+  force_https = false
+  auto_stop_machines = false
+  min_machines_running = 1  # ✅ только одна машина
+  processes = ["app"]
+
+  [[http_service.ports]]
+    handlers = ['http']
+    port = 80
+
+  [[http_service.ports]]
+    handlers = ['tls', 'http']
+    port = 443
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1

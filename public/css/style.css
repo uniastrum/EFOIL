@@ -1,0 +1,44 @@
+.user-card {
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+  position: relative;
+}
+
+.user-header {
+  display: flex;
+  justify-content: space-between;
+}
+
+.user-actions {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+}
+
+.user-actions button {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1.2rem;
+  margin-left: 0.5rem;
+}
+
+.device {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem;
+  background: #f5f5f5;
+  margin: 0.25rem 0;
+  border-radius: 4px;
+}
+
+.edit-btn {
+  color: #4CAF50;
+}
+
+.delete-btn {
+  color: #f44336;
+}
