@@ -1,4 +1,4 @@
-require('dotenv').config();
+ require('dotenv').config();
 const express = require('express');
 const { Telegraf } = require('telegraf');
 const sqlite3 = require('sqlite3').verbose();
