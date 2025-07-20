@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const session = require('express-session');
-const { Telegraf, Markup } = require('telegraf');
+const { Telegraf } = require('telegraf');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const fs = require('fs');
@@ -81,7 +81,7 @@ app.post('/login', (req, res) => {
     req.session.loggedIn = true;
     res.redirect('/admin');
   } else {
-    res.send('Wrong password');
+    res.send('Неверный пароль');
   }
 });
 
@@ -111,44 +111,15 @@ app.post('/add-user', isAuthenticated, (req, res) => {
 });
 
 app.get('/history', isAuthenticated, (req, res) => {
-  const { user_id, error, success } = req.query;
+  const { user_id } = req.query;
   db.all("SELECT command, created_at FROM commands WHERE user_id = ? ORDER BY created_at DESC", [user_id], (err, rows) => {
     if (err) return res.send('Ошибка при получении истории');
-    
     const history = rows.map(c => `<li>${c.created_at}: ${c.command}</li>`).join('');
-    
-    let message = '';
-    if (error) {
-      message = `<div style="color: red; margin-bottom: 15px;">${error}</div>`;
-    } else if (success) {
-      message = `<div style="color: green; margin-bottom: 15px;">${success}</div>`;
-    }
-
     res.send(`
-      <h2>История команд</h2>
-      ${message}
+      <h2>Command history</h2>
       <ul>${history}</ul>
-      <form method="POST" action="/clear-history" style="margin-top: 20px;">
-        <input type="hidden" name="user_id" value="${user_id}">
-        <button type="submit" style="background-color: #ff4d4d; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer;">
-          Очистить историю
-        </button>
-      </form>
-      <a href="/admin" style="display: inline-block; margin-top: 20px;">Назад</a>
+      <a href="/admin">back</a>
     `);
-  });
-});
-
-app.post('/clear-history', isAuthenticated, (req, res) => {
-  const { user_id } = req.body;
-  db.run("DELETE FROM commands WHERE user_id = ?", [user_id], function(err) {
-    if (err) {
-      console.error('Ошибка при очистке истории:', err);
-      return res.redirect(`/history?user_id=${user_id}&error=Ошибка при очистке истории`);
-    }
-    
-    console.log(`История очищена для пользователя ID: ${user_id}, удалено ${this.changes} записей`);
-    res.redirect(`/history?user_id=${user_id}&success=История успешно очищена`);
   });
 });
 
@@ -166,7 +137,7 @@ app.get('/export-csv', isAuthenticated, (req, res) => {
 app.post('/edit-user', isAuthenticated, (req, res) => {
   const { user_id, new_name, new_telegram_id } = req.body;
   db.run("UPDATE users SET name = ?, telegram_id = ? WHERE id = ?", [new_name, new_telegram_id, user_id], (err) => {
-    if (err) return res.send('Error updating');
+    if (err) return res.send('Ошибка обновления');
     res.redirect('/admin');
   });
 });
@@ -174,7 +145,7 @@ app.post('/edit-user', isAuthenticated, (req, res) => {
 app.post('/delete-user', isAuthenticated, (req, res) => {
   const { user_id } = req.body;
   db.run("DELETE FROM users WHERE id = ?", [user_id], (err) => {
-    if (err) return res.send('Error deleting');
+    if (err) return res.send('Ошибка удаления');
     res.redirect('/admin');
   });
 });
@@ -183,15 +154,15 @@ app.post('/add-device', isAuthenticated, (req, res) => {
   const { user_id, esp_number } = req.body;
   
   db.get("SELECT user_id FROM devices WHERE esp_number = ?", [esp_number], (err, row) => {
-    if (err) return res.redirect('/admin?error=Error checking boat');
-    if (row) return res.redirect('/admin?error=Boat already regitred');
+    if (err) return res.redirect('/admin?error=Ошибка проверки устройства');
+    if (row) return res.redirect('/admin?error=Устройство с таким номером уже зарегистрировано');
 
     db.run("INSERT INTO devices (user_id, esp_number) VALUES (?, ?)", [user_id, esp_number], (err) => {
       if (err) {
         if (err.errno === 19) {
-          return res.redirect('/admin?error=Boat already registred');
+          return res.redirect('/admin?error=Устройство с таким номером уже существует');
         }
-        return res.redirect('/admin?error=Error registring boat');
+        return res.redirect('/admin?error=Ошибка добавления устройства');
       }
       res.redirect('/admin');
     });
@@ -201,126 +172,42 @@ app.post('/add-device', isAuthenticated, (req, res) => {
 app.post('/delete-device', isAuthenticated, (req, res) => {
   const { user_id, esp_number } = req.body;
   db.run("DELETE FROM devices WHERE user_id = ? AND esp_number = ?", [user_id, esp_number], (err) => {
-    if (err) return res.send('Error deleting boat');
+    if (err) return res.send('Ошибка удаления устройства');
     res.redirect('/admin');
   });
 });
 
-// Функция для отображения списка лодок пользователя
-function showBoatSelection(ctx, userId, fromId) {
-  db.all("SELECT esp_number FROM devices WHERE user_id = ?", [userId], (err, devices) => {
-    if (err || !devices.length) {
-      return ctx.reply('You no have registred boat. Ask administrator');
-    }
-    
-    // Создаем кнопки для выбора лодки
-    const buttons = devices.map(device => 
-      Markup.button.callback(`Boat ${device.esp_number}`, `select_boat_${device.esp_number}`)
-    );
-    
-    ctx.reply('Choose boat:', Markup.inlineKeyboard(buttons, { columns: 3 }));
-  });
-}
-
-// Telegram Bot с inline-кнопками
-bot.command('start', (ctx) => {
-  const fromId = ctx.message.from.id.toString();
-  
-  db.get("SELECT id FROM users WHERE telegram_id = ?", [fromId], (err, user) => {
-    if (err || !user) {
-      return ctx.reply('You are not registred. Ask administrator.');
-    }
-    
-    // Используем функцию для показа лодок
-    showBoatSelection(ctx, user.id, fromId);
-  });
-});
-
-// Обработка выбора лодки
-bot.action(/select_boat_(\d+)/, (ctx) => {
-  const fromId = ctx.from.id.toString();
-  const espNumber = ctx.match[1];
-  
-  db.get("SELECT id FROM users WHERE telegram_id = ?", [fromId], (err, user) => {
-    if (err || !user) return ctx.answerCbQuery('Error: user not found');
-    
-    // Проверяем, что лодка принадлежит пользователю
-    db.get("SELECT * FROM devices WHERE user_id = ? AND esp_number = ?", [user.id, espNumber], (err, device) => {
-      if (err || !device) return ctx.answerCbQuery('Error: boat not found');
-      
-      userState[fromId] = { stage: 'awaiting_command', esp: espNumber };
-      
-      // Кнопки для выбора команды (3 в одну линию)
-      ctx.editMessageText(
-        `Boat ${espNumber}: choose action`,
-        Markup.inlineKeyboard([
-          Markup.button.callback('30 min', `command_30_${espNumber}`),
-          Markup.button.callback('60 min', `command_60_${espNumber}`),
-          Markup.button.callback('Turn off', `command_off_${espNumber}`)
-        ], { columns: 3 })
-      );
-    });
-  });
-});
-
-// Обработка выбора команды
-bot.action(/command_(30|60|off)_(\d+)/, (ctx) => {
-  const fromId = ctx.from.id.toString();
-  const command = ctx.match[1];
-  const espNumber = ctx.match[2];
-  
-  db.get("SELECT id FROM users WHERE telegram_id = ?", [fromId], (err, user) => {
-    if (err || !user) return ctx.answerCbQuery('Error: user not found');
-    
-    const userId = user.id;
-    const finalCommand = `ESP${espNumber}: ${command}`;
-    
-    db.run("INSERT INTO commands (user_id, command) VALUES (?, ?)", [userId, finalCommand], (err) => {
-      if (err) return ctx.answerCbQuery('Error saving command');
-      
-      userState[fromId] = null; // сброс состояния
-      ctx.editMessageText(`✅ Command "${finalCommand}" accepted`);
-    });
-  });
-});
-
-// Текстовая команда /boatX с показом кнопок
+// Telegram Bot
 bot.on('text', (ctx) => {
   const fromId = ctx.message.from.id.toString();
   const text = ctx.message.text.trim().toLowerCase();
 
   db.get("SELECT id FROM users WHERE telegram_id = ?", [fromId], (err, user) => {
     if (err || !user) {
-      return ctx.reply('You are not registred. Ask administrator.');
+      return ctx.reply('Вы не зарегистрированы. Обратитесь к администратору.');
     }
 
     const userId = user.id;
 
+    // Проверка, если пользователь ввёл номер лодки
     const boatMatch = text.match(/^\/?boat(\d{1,3})$/);
     if (boatMatch) {
       const espNumber = boatMatch[1];
 
       db.get("SELECT * FROM devices WHERE user_id = ? AND esp_number = ?", [userId, espNumber], (err, device) => {
         if (err || !device) {
-          return ctx.reply('Wrong boat number');
+          return ctx.reply('wrong number');
         }
 
-        // Показываем кнопки команд вместо текста
-        ctx.reply(
-          `Boat ${espNumber}: Choose action`,
-          Markup.inlineKeyboard([
-            Markup.button.callback('30 min', `command_30_${espNumber}`),
-            Markup.button.callback('60 min', `command_60_${espNumber}`),
-            Markup.button.callback('Turn off', `command_off_${espNumber}`)
-          ], { columns: 3 })
-        );
+        userState[fromId] = { stage: 'awaiting_command', esp: espNumber };
+        return ctx.reply('Выберите действие: 30, 60 или off');
       });
 
     } else if (userState[fromId] && userState[fromId].stage === 'awaiting_command') {
       const command = text;
 
       if (!['30', '60', 'off'].includes(command)) {
-        return ctx.reply('Wrong action. Use 30, 60 or Turn off');
+        return ctx.reply('Неверная команда. Используйте 30, 60 или off');
       }
 
       const espNumber = userState[fromId].esp;
@@ -328,16 +215,15 @@ bot.on('text', (ctx) => {
 
       db.run("INSERT INTO commands (user_id, command) VALUES (?, ?)", [userId, finalCommand], (err) => {
         if (err) {
-          return ctx.reply('Error saving command');
+          return ctx.reply('Ошибка при сохранении команды');
         }
 
-        userState[fromId] = null;
-        return ctx.reply('Command accepted');
+        userState[fromId] = null; // сброс состояния
+        return ctx.reply('Команда принята');
       });
 
     } else {
-      // Для любой нераспознанной команды показываем список лодок
-      showBoatSelection(ctx, userId, fromId);
+      ctx.reply('Сначала укажите номер лодки командой /boatX (например, /boat2)');
     }
   });
 });
