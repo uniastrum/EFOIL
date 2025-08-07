@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: efoil-server
+    env: node
+    buildCommand: npm install
+    startCommand: node server.js
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Добавь свои переменные из .env:
+      # - key: TELEGRAM_TOKEN
+      #   value: your_token_here

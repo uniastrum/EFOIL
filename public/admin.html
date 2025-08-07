@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Admin Panel</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Admin Panel</h1>
+      <a href="/logout" class="logout-btn">Logout</a>
+    </header>
+    
+    <section class="user-management">
+      <h2>User Management</h2>
+<div id="users-list" class="users-grid"></div>
+    </section>
+    
+    <section class="add-user">
+      <h3>Add New User</h3>
+      <form id="add-user-form">
+        <input type="number" name="telegram_id" placeholder="Telegram ID" required>
+        <input type="text" name="name" placeholder="User Name" required>
+        <button type="submit">Add User</button>
+      </form>
+    </section>
+    
+    <section class="add-device">
+      <h3>Add Device</h3>
+      <form id="add-device-form">
+        <select name="user_id" required>
+          <option value="">Select User</option>
+        </select>
+        <input type="text" name="esp_id" placeholder="ESP32 ID" required>
+        <input type="text" name="name" placeholder="Device Name">
+        <button type="submit">Add Device</button>
+      </form>
+    </section>
+  </div>
+  <script src="/js/admin.js"></script>
+</body>
+</html>
