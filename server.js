@@ -1,4 +1,6 @@
+// server.js
 require('dotenv').config();
+
 const express = require('express');
 const session = require('express-session');
 const { Telegraf, Markup } = require('telegraf');
@@ -9,38 +11,59 @@ const { stringify } = require('csv-stringify/sync');
 
 const app = express();
 
+// ---------- Telegram Bot ----------
+if (!process.env.BOT_TOKEN) {
+  console.error('BOT_TOKEN is not set');
+  process.exit(1);
+}
 const bot = new Telegraf(process.env.BOT_TOKEN);
+
+// Вариант 1: webhook через Express (Render/другие PaaS)
 app.use(bot.webhookCallback('/secret'));
 
+// Вариант 2: long polling, если BASE_URL нет
+async function ensureBotTransport() {
+  if (process.env.BASE_URL) {
+    const url = `${process.env.BASE_URL.replace(/\/+$/,'')}/secret`;
+    await bot.telegram.setWebhook(url);
+    console.log('Telegram webhook set to:', url);
+  } else {
+    await bot.telegram.deleteWebhook();
+    await bot.launch();
+    console.log('Telegram long polling started');
+  }
+}
+
+// ---------- БД ----------
+if (!process.env.DATABASE_URL) {
+  console.error('DATABASE_URL is not set');
+  process.exit(1);
+}
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false
-  },
-  max: 20,
-  idleTimeoutMillis: 30000
+  ssl: process.env.DATABASE_URL.includes('localhost') ? false : { rejectUnauthorized: false }
 });
 
-app.set('view engine', 'ejs');
-app.set('views', path.join(__dirname, 'views'));
-
-app.use(express.json());
+// ---------- Express ----------
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.json());
 
+if (!process.env.SESSION_SECRET) {
+  console.error('SESSION_SECRET is not set');
+  process.exit(1);
+}
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'keyboard_cat',
+  secret: process.env.SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
   cookie: {
-	secure: false,
+    secure: false,
     httpOnly: true,
     maxAge: 24 * 60 * 60 * 1000
   }
 }));
 
-const userState = {};
-
+// ---------- Инициализация схемы ----------
 async function initializeDatabase() {
   try {
     await pool.query(`
@@ -69,6 +92,10 @@ async function initializeDatabase() {
       )
     `);
 
+    // Колонки, которых могло не быть
+    await pool.query(`ALTER TABLE commands ADD COLUMN IF NOT EXISTS esp_number TEXT`);
+    await pool.query(`ALTER TABLE commands ADD COLUMN IF NOT EXISTS processed_at TIMESTAMP`);
+
     console.log('Database tables initialized');
   } catch (err) {
     console.error('Database initialization error:', err);
@@ -76,22 +103,31 @@ async function initializeDatabase() {
   }
 }
 
-initializeDatabase();
-
+// ---------- Утилиты ----------
 function isAuthenticated(req, res, next) {
-  if (req.session && req.session.loggedIn) return next();
-  res.redirect('/login');
+  if (req.session.loggedIn) return next();
+  return res.redirect('/login');
+}
+function tzBangkok(dt) {
+  // Красиво отображаем дату в Asia/Bangkok
+  try {
+    return new Date(dt).toLocaleString('ru-RU', { timeZone: 'Asia/Bangkok' });
+  } catch {
+    return new Date(dt).toISOString().replace('T',' ').replace('Z','');
+  }
 }
 
+// ---------- Маршруты ----------
 app.get('/', (req, res) => {
-  res.send('Server is running');
+  res.send('OK');
 });
 
 app.get('/login', (req, res) => {
   res.send(`
-    <form method="POST" action="/login">
-      <input type="password" name="password" placeholder="Admin password" required />
-      <button type="submit">Login</button>
+    <form method="POST" action="/login" style="max-width:340px;margin:2rem auto;font-family:sans-serif">
+      <h3>Admin Login</h3>
+      <input type="password" name="password" placeholder="Admin password" required style="width:100%;padding:.5rem;margin:.25rem 0"/>
+      <button type="submit" style="padding:.5rem 1rem">Login</button>
     </form>
   `);
 });
@@ -100,394 +136,236 @@ app.post('/login', (req, res) => {
   const { password } = req.body;
   if (password === process.env.ADMIN_PASSWORD) {
     req.session.loggedIn = true;
-    res.redirect('/admin');
-  } else {
-    res.send('Wrong password');
+    return res.redirect('/admin');
   }
+  res.send('Wrong password');
 });
 
 app.get('/admin', isAuthenticated, async (req, res) => {
   try {
-    const { rows } = await pool.query(`
-      SELECT users.id, users.username AS name, users.telegram_id, 
-       STRING_AGG(devices.esp_number, ', ') AS esp_list 
-FROM users 
-LEFT JOIN devices ON users.id = devices.user_id 
-GROUP BY users.id, users.username
+    const users = await pool.query(`
+      SELECT u.id, u.name, u.telegram_id, COALESCE(string_agg(d.esp_number, ', '), '') AS esp_list
+      FROM users u
+      LEFT JOIN devices d ON u.id = d.user_id
+      GROUP BY u.id
+      ORDER BY u.id
     `);
 
-    res.render('admin', {
-      users: rows,
-      error: req.query.error
-    });
+    const devices = await pool.query(`
+      SELECT d.id, d.esp_number, u.name AS user_name, u.id as user_id
+      FROM devices d
+      JOIN users u ON u.id = d.user_id
+      ORDER BY d.id
+    `);
+
+    const usersOptions = (await pool.query(`SELECT id, name FROM users ORDER BY id`)).rows
+      .map(u => `<option value="${u.id}">${u.id}. ${u.name || '(no name)'}</option>`).join('');
+
+    res.send(`
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Admin</title></head>
+<body style="font-family:sans-serif;max-width:900px;margin:24px auto">
+  <h2>Users</h2>
+  <table border="1" cellpadding="6" cellspacing="0">
+    <tr><th>ID</th><th>Name</th><th>Telegram</th><th>ESP</th><th>Actions</th></tr>
+    ${users.rows.map(r => `
+      <tr>
+        <td>${r.id}</td>
+        <td>${r.name || ''}</td>
+        <td>${r.telegram_id || ''}</td>
+        <td>${r.esp_list || ''}</td>
+        <td>
+          <form method="GET" action="/history" style="display:inline">
+            <input type="hidden" name="user_id" value="${r.id}"/>
+            <button>History</button>
+          </form>
+          <form method="POST" action="/delete-user" style="display:inline" onsubmit="return confirm('Delete user?')">
+            <input type="hidden" name="user_id" value="${r.id}"/>
+            <button>Delete</button>
+          </form>
+        </td>
+      </tr>`).join('')}
+  </table>
+
+  <h3>Add user</h3>
+  <form method="POST" action="/add-user">
+    <input name="name" placeholder="Name" required/>
+    <input name="telegram_id" placeholder="Telegram ID (numeric)" required/>
+    <button>Add</button>
+  </form>
+
+  <h2>Devices</h2>
+  <table border="1" cellpadding="6" cellspacing="0">
+    <tr><th>ID</th><th>ESP</th><th>User</th><th>Actions</th></tr>
+    ${devices.rows.map(r => `
+      <tr>
+        <td>${r.id}</td>
+        <td>${r.esp_number}</td>
+        <td>${r.user_name || ''}</td>
+        <td>
+          <form method="POST" action="/delete-device" style="display:inline" onsubmit="return confirm('Delete device?')">
+            <input type="hidden" name="device_id" value="${r.id}"/>
+            <button>Delete</button>
+          </form>
+        </td>
+      </tr>`).join('')}
+  </table>
+
+  <h3>Add device</h3>
+  <form method="POST" action="/add-device">
+    <select name="user_id" required>${usersOptions}</select>
+    <input name="esp_number" placeholder="ESP number, e.g. 1" required/>
+    <button>Add</button>
+  </form>
+
+</body></html>`);
   } catch (err) {
-    console.error('Admin error:', err);
-    res.send('Load data error');
+    console.error('Admin page error:', err);
+    res.status(500).send('Admin error');
   }
 });
 
 app.post('/add-user', isAuthenticated, async (req, res) => {
-  const { username, telegram_id } = req.body;
-
+  const { name, telegram_id } = req.body;
   try {
-    const userCheck = await pool.query(
-      'SELECT id FROM users WHERE telegram_id = $1',
-      [telegram_id]
-    );
-
-    if (userCheck.rows.length > 0) {
-      return res.redirect('/admin?error=This Telegram ID already exist');
-    }
-
-    await pool.query(
-      'INSERT INTO users (username, telegram_id) VALUES ($1, $2)',
-      [username, telegram_id]
-    );
-
+    const dupl = await pool.query('SELECT id FROM users WHERE telegram_id = $1', [telegram_id]);
+    if (dupl.rows.length) return res.send('This Telegram ID already exists');
+    await pool.query('INSERT INTO users(name, telegram_id) VALUES($1,$2)', [name, String(telegram_id)]);
     res.redirect('/admin');
-  } catch (err) {
-    console.error('Add user error:', err);
-    res.redirect('/admin?error=Error adding user');
-  }
-});
-
-app.get('/history', isAuthenticated, async (req, res) => {
-  const { user_id, error, success } = req.query;
-
-  try {
-    const { rows } = await pool.query(
-      `SELECT command, created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Bangkok' AS created_at
-       FROM commands
-       WHERE user_id = $1
-       ORDER BY created_at DESC`,
-      [user_id]
-    );
-
-    const history = rows.map(row => {
-      const formattedDate = new Date(row.created_at).toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
-      return `<li>${formattedDate}: ${row.command}</li>`;
-    }).join('');
-
-    let message = '';
-    if (error) message = `<div style="color: red; margin-bottom: 15px;">${error}</div>`;
-    if (success) message = `<div style="color: green; margin-bottom: 15px;">${success}</div>`;
-
-    res.send(`
-      <h2>История команд</h2>
-      ${message}
-      
-      <form method="GET" action="/history-stats" style="margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px;">
-        <h3>Анализ по датам</h3>
-        <input type="hidden" name="user_id" value="${user_id}">
-        <label>С: <input type="date" name="start_date" required></label>
-        <label>По: <input type="date" name="end_date" required></label>
-        <button type="submit" style="padding: 5px 10px; background: #4CAF50; color: white; border: none; border-radius: 3px;">
-          Анализировать
-        </button>
-      </form>
-
-      <ul>${history}</ul>
-      
-      <form method="POST" action="/clear-history" style="margin-top: 20px;">
-        <input type="hidden" name="user_id" value="${user_id}">
-        <button type="submit" style="background-color: #ff4d4d; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer;">
-          Очистить историю
-        </button>
-      </form>
-      <a href="/admin" style="display: inline-block; margin-top: 20px;">← Назад в админку</a>
-    `);
-  } catch (err) {
-    console.error('History error:', err);
-    res.send('Ошибка загрузки истории');
-  }
-});
-
-
-app.post('/add-device', isAuthenticated, async (req, res) => {
-  const { user_id, esp_number } = req.body;
-
-  try {
-    const deviceCheck = await pool.query(
-      'SELECT user_id FROM devices WHERE esp_number = $1',
-      [esp_number]
-    );
-
-    if (deviceCheck.rows.length > 0) {
-      return res.redirect('/admin?error=Boat already registered');
-    }
-
-    await pool.query(
-      'INSERT INTO devices (user_id, esp_number) VALUES ($1, $2)',
-      [user_id, esp_number]
-    );
-
-    res.redirect('/admin');
-  } catch (err) {
-    console.error('Add device error:', err);
-    res.redirect('/admin?error=Error registering boat');
-  }
-});
-
-app.post('/clear-history', isAuthenticated, async (req, res) => {
-  const { user_id } = req.body;
-
-  try {
-    await pool.query(
-      'DELETE FROM commands WHERE user_id = $1',
-      [user_id]
-    );
-    
-    res.redirect(`/history?user_id=${user_id}&success=History cleared successfully`);
-  } catch (err) {
-    console.error('Clear history error:', err);
-    res.redirect(`/history?user_id=${user_id}&error=Error clearing history`);
+  } catch (e) {
+    console.error('Add user error:', e);
+    res.status(500).send('Add user error');
   }
 });
 
 app.post('/delete-user', isAuthenticated, async (req, res) => {
   const { user_id } = req.body;
-
   try {
     await pool.query('DELETE FROM users WHERE id = $1', [user_id]);
     res.redirect('/admin');
-  } catch (err) {
-    console.error('Delete user error:', err);
-    res.send('Error deleting user');
+  } catch (e) {
+    console.error('Delete user error:', e);
+    res.status(500).send('Delete user error');
+  }
+});
+
+app.post('/add-device', isAuthenticated, async (req, res) => {
+  const { user_id, esp_number } = req.body;
+  try {
+    await pool.query('INSERT INTO devices(user_id, esp_number) VALUES($1,$2)', [user_id, String(esp_number)]);
+    res.redirect('/admin');
+  } catch (e) {
+    console.error('Add device error:', e);
+    res.status(500).send('Add device error');
+  }
+});
+
+app.post('/delete-device', isAuthenticated, async (req, res) => {
+  const { device_id } = req.body;
+  try {
+    await pool.query('DELETE FROM devices WHERE id = $1', [device_id]);
+    res.redirect('/admin');
+  } catch (e) {
+    console.error('Delete device error:', e);
+    res.status(500).send('Delete device error');
+  }
+});
+
+app.get('/history', isAuthenticated, async (req, res) => {
+  const { user_id } = req.query;
+  try {
+    const { rows } = await pool.query(`
+      SELECT command, esp_number, processed, created_at, processed_at
+      FROM commands
+      WHERE user_id = $1
+      ORDER BY created_at DESC
+    `, [user_id]);
+
+    const list = rows.map(r => {
+      const created = tzBangkok(r.created_at);
+      const status = r.processed
+        ? `<span style="color:green">✔ выполнена ${r.processed_at ? tzBangkok(r.processed_at) : ''}</span>`
+        : `<span style="color:#e69500">⏳ ожидает</span>`;
+      const espInfo = r.esp_number ? ` <small>(ESP ${r.esp_number})</small>` : '';
+      return `<li>${created}: ${r.command}${espInfo} — ${status}</li>`;
+    }).join('');
+
+    res.send(`
+<!doctype html><html><head><meta charset="utf-8"><title>History</title></head>
+<body style="font-family:sans-serif;max-width:900px;margin:24px auto">
+  <h2>History (user ${user_id})</h2>
+  <p>
+    <a href="/export-csv?user_id=${user_id}">Export CSV</a> |
+    <form method="POST" action="/clear-history" style="display:inline" onsubmit="return confirm('Clear?')">
+      <input type="hidden" name="user_id" value="${user_id}"/>
+      <button>Clear history</button>
+    </form>
+  </p>
+  <ol>${list}</ol>
+  <p><a href="/admin">← back</a></p>
+</body></html>`);
+  } catch (e) {
+    console.error('History error:', e);
+    res.status(500).send('History error');
+  }
+});
+
+app.post('/clear-history', isAuthenticated, async (req, res) => {
+  const { user_id } = req.body;
+  try {
+    await pool.query('DELETE FROM commands WHERE user_id = $1', [user_id]);
+    res.redirect(`/history?user_id=${user_id}`);
+  } catch (e) {
+    console.error('Clear history error:', e);
+    res.status(500).send('Clear error');
   }
 });
 
 app.get('/export-csv', isAuthenticated, async (req, res) => {
   const { user_id } = req.query;
-
   try {
-    const { rows } = await pool.query(
-      'SELECT command, created_at FROM commands WHERE user_id = $1 ORDER BY created_at DESC',
-      [user_id]
-    );
+    const { rows } = await pool.query(`
+      SELECT command, esp_number, processed,
+             to_char(created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Bangkok','YYYY-MM-DD HH24:MI:SS') AS created_at,
+             to_char(processed_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Bangkok','YYYY-MM-DD HH24:MI:SS') AS processed_at
+      FROM commands
+      WHERE user_id = $1
+      ORDER BY created_at DESC
+    `, [user_id]);
 
-    const csv = stringify(rows, {
-      header: true,
-      columns: { command: 'Command', created_at: 'Created At' }
-    });
-
-    res.setHeader('Content-disposition', 'attachment; filename=command_history.csv');
-    res.set('Content-Type', 'text/csv');
+    const csv = stringify(rows, { header: true });
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="history_user_${user_id}.csv"`);
     res.send(csv);
-  } catch (err) {
-    console.error('Export CSV error:', err);
+  } catch (e) {
+    console.error('Export CSV error:', e);
     res.status(500).send('Export error');
   }
 });
 
-app.get('/history-stats', isAuthenticated, async (req, res) => {
-  const { user_id, start_date, end_date } = req.query;
-
-  try {
-    // Получаем историю команд за выбранный период
-    const { rows } = await pool.query(
-      `SELECT command, created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Bangkok' AS created_at
-       FROM commands
-       WHERE user_id = $1 
-       AND created_at >= $2::timestamp 
-       AND created_at <= $3::timestamp + interval '1 day'
-       ORDER BY created_at DESC`,
-      [user_id, start_date, end_date]
-    );
-
-    // Анализ статистики
-    let totalTime = 0;
-    let count30min = 0;
-    let count60min = 0;
-    let countOff = 0;
-
-    rows.forEach(row => {
-      if (row.command.includes('/30')) {
-        totalTime += 30;
-        count30min++;
-      } else if (row.command.includes('/60')) {
-        totalTime += 60;
-        count60min++;
-      } else if (row.command.includes('/off')) {
-        countOff++;
-      }
-    });
-
-    // Сколько раз по 30 минут в сумме
-    const total30minIntervals = Math.round(totalTime / 30);
-
-    // Формируем HTML с результатами
-    const statsHTML = `
-      <h3>Статистика за период: ${start_date} — ${end_date}</h3>
-      <ul>
-        <li>Включений на 30 мин: <strong>${count30min}</strong></li>
-        <li>Включений на 60 мин: <strong>${count60min}</strong></li>
-        <li>Выключений: <strong>${countOff}</strong></li>
-        <li>Общее время работы: <strong>${totalTime} мин</strong></li>
-        <li>Эквивалентно <strong>${total30minIntervals} × 30 мин</strong></li>
-      </ul>
-      <a href="/history?user_id=${user_id}" style="display: inline-block; margin-top: 20px;">← Назад к истории</a>
-    `;
-
-    res.send(statsHTML);
-  } catch (err) {
-    console.error('History stats error:', err);
-    res.send('Ошибка при анализе статистики');
-  }
-});
-
-app.post('/delete-device', isAuthenticated, async (req, res) => {
-  const { user_id, esp_number } = req.body;
-
-  try {
-    await pool.query(
-      'DELETE FROM devices WHERE user_id = $1 AND esp_number = $2',
-      [user_id, esp_number]
-    );
-    res.redirect('/admin');
-  } catch (err) {
-    console.error('Delete device error:', err);
-    res.send('Error deleting boat');
-  }
-});
-
-const PORT = process.env.PORT || 8080;
-app.listen(8080, '0.0.0.0', () => {
-  console.log('Server running on port 8080');
-});
-
-process.once('SIGINT', async () => {
-  await bot.stop('SIGINT');
-  await pool.end();
-  process.exit(0);
-});
-
-process.once('SIGTERM', async () => {
-  await bot.stop('SIGTERM');
-  await pool.end();
-  process.exit(0);
-});
-
-// Telegram bot handlers
-bot.start(async (ctx) => {
-  await handleStart(ctx);
-});
-
-bot.on('message', async (ctx) => {
-  await handleStart(ctx);
-});
-
-async function handleStart(ctx) {
-  const telegramId = String(ctx.from.id);
-
-  try {
-    const userResult = await pool.query(
-      'SELECT id, username FROM users WHERE telegram_id = $1',
-      [telegramId]
-    );
-
-    if (userResult.rows.length === 0) {
-      return ctx.reply('You are not rigistred. No money - no honney!');
-    }
-
-    const userId = userResult.rows[0].id;
-
-    const deviceResult = await pool.query(
-      'SELECT esp_number FROM devices WHERE user_id = $1',
-      [userId]
-    );
-
-    if (deviceResult.rows.length === 0) {
-      return ctx.reply('You are no have rigistred boats');
-    }
-
-    const deviceButtons = deviceResult.rows.map((row) => [
-      Markup.button.callback(`Boat ${row.esp_number}`, `select_device:${row.esp_number}`)
-    ]);
-
-    ctx.reply('Choose boat:', Markup.inlineKeyboard(deviceButtons));
-  } catch (err) {
-    console.error('Telegram message error:', err);
-    ctx.reply('Error.');
-  }
-}
-
-bot.action(/select_device:(.+)/, async (ctx) => {
-  const espNumber = ctx.match[1];
-  const telegramId = String(ctx.from.id);
-
-  userState[telegramId] = { espNumber };
-
-  await ctx.answerCbQuery();
-  ctx.reply(`Boat control ${espNumber}`, Markup.inlineKeyboard([
-    [
-      Markup.button.callback('30 min', 'send_command:/30'),
-      Markup.button.callback('60 min', 'send_command:/60')
-    ],
-    [Markup.button.callback('Turn off', 'send_command:/off')]
-  ]));
-});
-
-bot.action(/send_command:(.+)/, async (ctx) => {
-  const command = ctx.match[1];
-  const telegramId = String(ctx.from.id);
-
-  const state = userState[telegramId];
-  if (!state || !state.espNumber) {
-    return ctx.reply('Choose boat at first.');
-  }
-
-  try {
-    const userResult = await pool.query(
-      'SELECT id FROM users WHERE telegram_id = $1',
-      [telegramId]
-    );
-
-    if (userResult.rows.length === 0) {
-      return ctx.reply('You are not registred.');
-    }
-
-    const userId = userResult.rows[0].id;
-    const fullCommand = `${state.espNumber}${command}`;
-
-    await pool.query(
-  'INSERT INTO commands (user_id, command, processed, esp_number) VALUES ($1, $2, 0, $3)',
-  [userId, fullCommand, state.espNumber]
-);
-
-
-    ctx.reply(`Command ${fullCommand} sended.`);
-  } catch (err) {
-    console.error('Send command error:', err);
-    ctx.reply('Send command error.');
-  }
-});
-
+// ---------- Отдача команды ESP ----------
 app.get('/get_command', async (req, res) => {
   const { esp } = req.query;
-
-  if (!esp) {
-    return res.status(400).send('Missing esp parameter');
-  }
+  if (!esp) return res.status(400).send('Missing esp parameter');
 
   try {
+    //Находим владельца устройства по esp_number
     const deviceResult = await pool.query(
       'SELECT user_id FROM devices WHERE esp_number = $1',
-      [esp]
+      [String(esp)]
     );
-
-    if (deviceResult.rows.length === 0) {
-      return res.status(404).send('Unknown ESP number');
-    }
+    if (deviceResult.rows.length === 0) return res.status(404).send('Unknown ESP number');
 
     const userId = deviceResult.rows[0].user_id;
 
+    // Берём самую раннюю НЕобработанную команду для этого юзера/ESP
     const commandResult = await pool.query(
-  `SELECT id, command FROM commands 
-   WHERE user_id = $1 AND processed = 0 AND esp_number = $2 
-   ORDER BY created_at ASC LIMIT 1`,
-  [userId, esp]
-);
-
+      `SELECT id, command FROM commands
+       WHERE user_id = $1 AND processed = 0 AND (esp_number = $2 OR esp_number IS NULL OR esp_number = '')
+       ORDER BY created_at ASC
+       LIMIT 1`,
+      [userId, String(esp)]
+    );
 
     if (commandResult.rows.length === 0) {
       return res.send('NO_COMMAND');
@@ -495,15 +373,96 @@ app.get('/get_command', async (req, res) => {
 
     const { id, command } = commandResult.rows[0];
 
-    // Обновим статус processed = 1
+    // Ставим processed=1 и время
     await pool.query(
-      'UPDATE commands SET processed = 1 WHERE id = $1',
+      'UPDATE commands SET processed = 1, processed_at = CURRENT_TIMESTAMP WHERE id = $1',
       [id]
     );
 
-    res.send(command);
+    // Шлём уведомление в Telegram владельцу
+    try {
+      const userRow = await pool.query(
+        'SELECT u.telegram_id FROM users u WHERE u.id = $1',
+        [userId]
+      );
+      const tg = userRow.rows[0]?.telegram_id;
+      if (tg) {
+        await bot.telegram.sendMessage(
+          String(tg),
+          `✅ Команда для ESP ${esp} принята устройством: ${command}`
+        );
+      }
+    } catch (tgErr) {
+      console.error('Telegram notify error:', tgErr);
+    }
+
+    return res.send(command);
   } catch (err) {
     console.error('Error in /get_command:', err);
     res.status(500).send('Server error');
   }
+});
+
+// ---------- Telegram: обработка входа ----------
+bot.start(async (ctx) => {
+  await handleMessage(ctx);
+});
+
+bot.on('message', async (ctx) => {
+  await handleMessage(ctx);
+});
+
+// Простой обработчик: принимаем сообщения вида "1/30", "1/60", "1/off"
+async function handleMessage(ctx) {
+  const telegramId = String(ctx.from.id);
+  const text = (ctx.message?.text || '').trim();
+
+  // Находим/проверяем пользователя
+  const userResult = await pool.query('SELECT id, name FROM users WHERE telegram_id = $1', [telegramId]);
+  if (userResult.rows.length === 0) {
+    return ctx.reply('Вы не зарегистрированы.');
+  }
+  const userId = userResult.rows[0].id;
+
+  // Пытаемся распарсить команду
+  const m = text.match(/^(\d+)\s*\/\s*(off|\d+)$/i);
+  if (!m) {
+    return ctx.reply('Пришлите команду в формате: 1/30, 1/60 или 1/off');
+  }
+  const espNumber = m[1];
+  const right = m[2].toLowerCase();
+  const norm = `${espNumber}/${right}`;
+
+  // Сохраняем
+  await pool.query(
+    'INSERT INTO commands(user_id, command, processed, esp_number) VALUES($1,$2,0,$3)',
+    [userId, norm, espNumber]
+  );
+
+  return ctx.reply(`Команда добавлена: ${norm}`);
+}
+
+// ---------- Старт ----------
+async function main() {
+  await initializeDatabase();
+  await ensureBotTransport();
+
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => console.log('HTTP server on', PORT));
+}
+main().catch(err => {
+  console.error('Fatal start error:', err);
+  process.exit(1);
+});
+
+// Корректное завершение
+process.once('SIGINT', async () => {
+  try { await bot.stop('SIGINT'); } catch {}
+  try { await pool.end(); } catch {}
+  process.exit(0);
+});
+process.once('SIGTERM', async () => {
+  try { await bot.stop('SIGTERM'); } catch {}
+  try { await pool.end(); } catch {}
+  process.exit(0);
 });
